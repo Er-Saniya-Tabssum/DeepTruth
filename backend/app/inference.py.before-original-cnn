@@ -1,0 +1,360 @@
+"""Pretrained AI-generated media detection provider.
+
+DeepTruth deliberately uses a pretrained classifier rather than training a model
+locally. The configured CapCheck model publishes REAL=0 and FAKE=1. Results are
+probabilistic forensic signals, not proof of authenticity.
+"""
+from __future__ import annotations
+
+import hashlib
+import os
+import time
+from functools import lru_cache
+from typing import Any
+
+from .config import settings
+
+
+class InferenceProvider:
+    def process(self, path: str, media_type: str = "IMAGE") -> dict[str, Any]:
+        raise NotImplementedError
+
+    def health_check(self) -> dict[str, Any]:
+        raise NotImplementedError
+
+
+class HuggingFaceImageDetector(InferenceProvider):
+    def __init__(self) -> None:
+        self.model_id = settings.model_id
+        self.device = settings.model_device
+        self._pipeline = None
+
+    def _load(self):
+        if self._pipeline is not None:
+            return self._pipeline
+        try:
+            from transformers import pipeline
+        except ImportError as exc:
+            raise RuntimeError(
+                "Real inference requires transformers and torch. "
+                "Install backend/requirements.txt."
+            ) from exc
+
+        kwargs: dict[str, Any] = {
+            "task": "image-classification",
+            "model": self.model_id,
+        }
+        if settings.model_revision:
+            kwargs["revision"] = settings.model_revision
+
+        model_kwargs: dict[str, Any] = {}
+        if settings.model_cache_dir:
+            model_kwargs["cache_dir"] = settings.model_cache_dir
+        if settings.model_low_cpu_mem_usage:
+            model_kwargs["low_cpu_mem_usage"] = True
+        if model_kwargs:
+            kwargs["model_kwargs"] = model_kwargs
+
+        requested = self.device.lower().strip()
+        if requested == "cpu":
+            kwargs["device"] = -1
+        elif requested == "cuda":
+            import torch
+            if not torch.cuda.is_available():
+                raise RuntimeError("MODEL_DEVICE=cuda was requested, but CUDA is not available.")
+            kwargs["device"] = 0
+        elif requested.isdigit():
+            kwargs["device"] = int(requested)
+        else:
+            try:
+                import torch
+                kwargs["device"] = 0 if torch.cuda.is_available() else -1
+            except Exception:
+                kwargs["device"] = -1
+
+        self._pipeline = pipeline(**kwargs)
+        return self._pipeline
+
+    @staticmethod
+    def _scores(predictions: list[dict[str, Any]]) -> tuple[float, float]:
+        """Map upstream labels to (fake_probability, real_probability)."""
+        fake = 0.0
+        real = 0.0
+        for item in predictions:
+            label = str(item.get("label", "")).strip().lower()
+            score = float(item.get("score", 0.0))
+            if label in {"fake", "ai", "ai-generated", "ai_generated", "synthetic", "generated"} or any(
+                token in label for token in ("fake", "synthetic", "generated")
+            ):
+                fake = max(fake, score)
+            elif label in {"real", "authentic", "human"} or any(
+                token in label for token in ("real", "authentic")
+            ):
+                real = max(real, score)
+
+        if fake == 0.0 and real == 0.0 and len(predictions) == 2:
+            by_label = {
+                str(item.get("label", "")).strip().lower(): float(item.get("score", 0.0))
+                for item in predictions
+            }
+            if "label_1" in by_label and "label_0" in by_label:
+                fake, real = by_label["label_1"], by_label["label_0"]
+
+        total = fake + real
+        if total > 0:
+            fake, real = fake / total, real / total
+        return fake, real
+
+    @staticmethod
+    def _verdict(ai_probability: float) -> tuple[str, str]:
+        distance = abs(ai_probability - 0.5)
+        confidence = "HIGH" if distance >= 0.30 else "MEDIUM" if distance >= 0.12 else "LOW"
+        if ai_probability >= 0.75:
+            return "AI_GENERATED", confidence
+        if ai_probability >= 0.55:
+            return "POTENTIALLY_MANIPULATED", confidence
+        return "AUTHENTIC", confidence
+
+    @staticmethod
+    def _sha256(path: str) -> str:
+        digest = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        return digest.hexdigest()
+
+    @staticmethod
+    def _image_metadata(path: str) -> dict[str, Any]:
+        metadata: dict[str, Any] = {
+            "width": None,
+            "height": None,
+            "format": None,
+            "exif_present": False,
+        }
+        try:
+            from PIL import Image
+            with Image.open(path) as image:
+                metadata.update(
+                    {
+                        "width": image.width,
+                        "height": image.height,
+                        "format": image.format,
+                        "exif_present": bool(image.getexif()),
+                    }
+                )
+        except Exception:
+            pass
+        return metadata
+
+    @staticmethod
+    def _evidence(fake: float, real: float, metadata: dict[str, Any]) -> list[dict[str, Any]]:
+        margin = abs(fake - real)
+        margin_level = "HIGH" if margin >= 0.60 else "MEDIUM" if margin >= 0.20 else "LOW"
+        signal_level = "HIGH" if fake >= 0.75 else "MEDIUM" if fake >= 0.55 else "LOW"
+        signal_text = "AI-generated signal" if fake >= 0.55 else "Authentic signal"
+        return [
+            {
+                "type": "MODEL_SIGNAL",
+                "severity": signal_level,
+                "title": "AI-generation classifier",
+                "value": f"{fake * 100:.1f}%",
+                "explanation": f"The pretrained classifier produced a {fake * 100:.1f}% AI-generation probability ({signal_text}).",
+            },
+            {
+                "type": "MODEL_MARGIN",
+                "severity": margin_level,
+                "title": "Decision margin",
+                "value": f"{margin * 100:.1f}%",
+                "explanation": "Distance between the real and fake probabilities; a small margin should be treated as inconclusive.",
+            },
+            {
+                "type": "METADATA",
+                "severity": "INFO",
+                "title": "Image metadata",
+                "value": "EXIF present" if metadata.get("exif_present") else "No EXIF metadata",
+                "explanation": "Metadata presence is contextual evidence only and does not prove whether media is authentic.",
+            },
+        ]
+
+    def _detect_faces(self, path: str) -> list[dict[str, Any]]:
+        try:
+            import cv2
+            image = cv2.imread(path)
+            if image is None:
+                return []
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+            cascade = cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
+            detector = cv2.CascadeClassifier(cascade)
+            boxes = detector.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=5, minSize=(32, 32)
+            )
+            return [
+                {
+                    "face_id": f"face-{index + 1}",
+                    "bbox": {"x": int(x), "y": int(y), "width": int(w), "height": int(h)},
+                    "identity_name": None,
+                    "identity_confidence": None,
+                    "deepfake_probability": None,
+                    "notes": "Face detected; this detector does not independently establish a face swap.",
+                }
+                for index, (x, y, w, h) in enumerate(boxes)
+            ]
+        except Exception:
+            return []
+
+    def _classify_image(self, image: Any) -> tuple[float, float, list[dict[str, Any]]]:
+        predictions = self._load()(image, top_k=5)
+        fake, real = self._scores(predictions)
+        return fake, real, predictions
+
+    def process(self, path: str, media_type: str = "IMAGE") -> dict[str, Any]:
+        started = time.perf_counter()
+        if not path or not os.path.isfile(path):
+            raise FileNotFoundError(f"Media file not found: {path}")
+        if media_type == "VIDEO":
+            return self._process_video(path, started)
+
+        from PIL import Image
+        with Image.open(path).convert("RGB") as image:
+            fake, real, raw = self._classify_image(image)
+
+        verdict, confidence = self._verdict(fake)
+        faces = self._detect_faces(path)
+        metadata = self._image_metadata(path)
+
+        return {
+            "verdict": verdict,
+            "authenticity_score": round(real, 4),
+            "ai_probability": round(fake, 4),
+            "face_swap_probability": None,
+            "confidence": confidence,
+            "faces_detected": len(faces),
+            "detected_faces": faces,
+            "evidence": self._evidence(fake, real, metadata),
+            "suspicious_regions": [],
+            "frame_results": None,
+            "media_metadata": {**metadata, "sha256": self._sha256(path)},
+            "model_metadata": {
+                "model_name": self.model_id,
+                "version": settings.model_revision or "main",
+                "framework": "Hugging Face Transformers / PyTorch",
+                "inference_mode": "REAL",
+                "device": self._device_name(),
+                "processing_time": round(time.perf_counter() - started, 3),
+            },
+            "raw_predictions": raw,
+            "limitations": [
+                "AI-image detection is probabilistic and can produce false positives/negatives.",
+                "The selected model was trained primarily on pre-2024 generators and may be weaker on newer generators.",
+                "A face detection is not itself evidence of a face swap.",
+            ],
+        }
+
+    def _process_video(self, path: str, started: float) -> dict[str, Any]:
+        try:
+            import cv2
+        except ImportError as exc:
+            raise RuntimeError("Video inference requires opencv-python-headless.") from exc
+
+        cap = cv2.VideoCapture(path)
+        if not cap.isOpened():
+            raise RuntimeError("Unable to open video file.")
+        fps = cap.get(cv2.CAP_PROP_FPS) or 1.0
+        total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration = total / fps if total else 0.0
+        sample_count = min(
+            settings.max_analyzed_frames,
+            max(1, int(duration / max(settings.video_sample_interval, 0.25)) + 1),
+        )
+        results: list[dict[str, Any]] = []
+
+        try:
+            from PIL import Image
+            for index in range(sample_count):
+                timestamp = min(index * settings.video_sample_interval, max(duration - 0.01, 0))
+                cap.set(cv2.CAP_PROP_POS_MSEC, timestamp * 1000)
+                ok, frame = cap.read()
+                if not ok:
+                    continue
+                rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                image = Image.fromarray(rgb)
+                predictions = self._load()(image, top_k=5)
+                fake, real = self._scores(predictions)
+                frame_verdict, _ = self._verdict(fake)
+                results.append(
+                    {
+                        "frame": index + 1,
+                        "timestamp": round(timestamp, 2),
+                        "ai_probability": round(fake, 4),
+                        "authenticity_score": round(real, 4),
+                        "finding": frame_verdict,
+                    }
+                )
+        finally:
+            cap.release()
+
+        if not results:
+            raise RuntimeError("No analyzable frames were extracted from the video.")
+
+        ai_probability = sum(item["ai_probability"] for item in results) / len(results)
+        authenticity = 1.0 - ai_probability
+        verdict, confidence = self._verdict(ai_probability)
+        return {
+            "verdict": verdict,
+            "authenticity_score": round(authenticity, 4),
+            "ai_probability": round(ai_probability, 4),
+            "face_swap_probability": None,
+            "confidence": confidence,
+            "faces_detected": None,
+            "detected_faces": [],
+            "evidence": self._evidence(ai_probability, authenticity, {"exif_present": False}),
+            "suspicious_regions": [],
+            "frame_results": results,
+            "model_metadata": {
+                "model_name": self.model_id,
+                "version": settings.model_revision or "main",
+                "framework": "Hugging Face Transformers / PyTorch",
+                "inference_mode": "REAL",
+                "device": self._device_name(),
+                "processing_time": round(time.perf_counter() - started, 3),
+                "sampled_frames": len(results),
+            },
+            "limitations": [
+                "Video verdict is an aggregate of sampled frames.",
+                "A face swap is not independently established by this image detector.",
+            ],
+        }
+
+    def _device_name(self) -> str:
+        try:
+            import torch
+            return "CUDA:0" if torch.cuda.is_available() else "CPU"
+        except Exception:
+            return "CPU"
+
+    def health_check(self) -> dict[str, Any]:
+        try:
+            import torch
+            return {
+                "model_loaded": self._pipeline is not None,
+                "available": True,
+                "model_id": self.model_id,
+                "device": self._device_name(),
+                "cuda_available": bool(torch.cuda.is_available()),
+            }
+        except Exception as exc:
+            return {
+                "model_loaded": False,
+                "available": False,
+                "model_id": self.model_id,
+                "reason": str(exc),
+            }
+
+
+@lru_cache(maxsize=1)
+def get_inference_provider() -> InferenceProvider:
+    return HuggingFaceImageDetector()
+
+
+def create_inference_provider() -> InferenceProvider:
+    return get_inference_provider()

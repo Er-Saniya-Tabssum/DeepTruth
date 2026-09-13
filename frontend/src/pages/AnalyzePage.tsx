@@ -1,0 +1,188 @@
+﻿import React, {useState} from 'react'
+import {useNavigate} from 'react-router-dom'
+import MediaDropzone from '../components/MediaDropzone'
+import MediaPreview from '../components/MediaPreview'
+import AnalysisProgress from '../components/AnalysisProgress'
+import {useAnalysisJob} from '../hooks/useAnalysisJob'
+
+const ACCEPT=['.jpg','.jpeg','.png','.webp','.mp4','.mov','.avi','.mkv']
+const MAX_MB=20
+
+export default function AnalyzePage(){
+  const {
+    file,
+    selectFile,
+    uploadAndStart,
+    state,
+    analysis,
+    error,
+    cancel
+  } = useAnalysisJob()
+
+  const navigate=useNavigate()
+  const [modelProvider,setModelProvider]=useState<'PRODUCTION'|'MY_MODEL'>('PRODUCTION')
+  const [trainingConsent,setTrainingConsent]=useState(false)
+
+  const handleUpload=()=>{
+    uploadAndStart(modelProvider)
+  }
+
+  return (
+    <div className="max-w-6xl mx-auto px-5 py-8">
+      <div>
+        <div className="text-xs uppercase tracking-[.2em] text-cyan-300">
+          New forensic scan
+        </div>
+
+        <h1 className="mt-2 text-4xl font-bold text-white">
+          Analyze media
+        </h1>
+
+        <p className="mt-2 text-slate-400">
+          Upload an image or video and let the real ML pipeline inspect it.
+        </p>
+      </div>
+
+      <div className="grid lg:grid-cols-[1.2fr_.8fr] gap-5 mt-8">
+        <div className="card rounded-2xl p-6">
+          <MediaDropzone
+            accept={ACCEPT}
+            maxSizeBytes={MAX_MB*1024*1024}
+            onFileSelected={selectFile}
+          />
+
+          {file && (
+            <div className="mt-5">
+              <MediaPreview file={file}/>
+
+              <div className="mt-5 rounded-xl border border-white/10 bg-white/5 p-4">
+                <h2 className="font-semibold text-white">
+                  Select detection model
+                </h2>
+
+                <p className="mt-1 text-sm text-slate-400">
+                  Choose which model should analyze this media.
+                </p>
+
+                <div className="mt-4 space-y-3">
+                  <label className="flex items-start gap-3 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="modelProvider"
+                      value="PRODUCTION"
+                      checked={modelProvider==='PRODUCTION'}
+                      onChange={()=>setModelProvider('PRODUCTION')}
+                      className="mt-1"
+                    />
+
+                    <span>
+                      <span className="block font-medium text-white">
+                        Production Model
+                      </span>
+                      <span className="block text-sm text-slate-400">
+                        Recommended model for normal forensic analysis.
+                      </span>
+                    </span>
+                  </label>
+
+                  <label className="flex items-start gap-3 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="modelProvider"
+                      value="MY_MODEL"
+                      checked={modelProvider==='MY_MODEL'}
+                      onChange={()=>setModelProvider('MY_MODEL')}
+                      className="mt-1"
+                    />
+
+                    <span>
+                      <span className="block font-medium text-white">
+                        My Model
+                      </span>
+                      <span className="block text-sm text-slate-400">
+                        Analyze using the original DeepTruth .h5 model.
+                      </span>
+                    </span>
+                  </label>
+                </div>
+
+                <label className="mt-5 flex items-start gap-3 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={trainingConsent}
+                    onChange={(event)=>setTrainingConsent(event.target.checked)}
+                    className="mt-1"
+                  />
+
+                  <span className="text-sm text-slate-300">
+                    Can we use your data to train/improve our original model?
+                    <span className="block mt-1 text-xs text-slate-500">
+                      Your consent will be recorded with this analysis.
+                    </span>
+                  </span>
+                </label>
+              </div>
+
+              <div className="mt-4 flex gap-3">
+                <button
+                  onClick={handleUpload}
+                  disabled={['UPLOADING','QUEUED','PROCESSING'].includes(state)}
+                  className="px-5 py-3 rounded-xl bg-indigo-500 hover:bg-indigo-400 disabled:opacity-40 text-white font-semibold"
+                >
+                  {state==='UPLOADING'?'Uploading…':'Run detection'}
+                </button>
+
+                <button
+                  onClick={cancel}
+                  className="px-5 py-3 rounded-xl bg-white/5 text-slate-300"
+                >
+                  Remove
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="card rounded-2xl p-6">
+          <div className="flex items-center justify-between">
+            <h2 className="font-semibold text-white">
+              Analysis pipeline
+            </h2>
+
+            <span className="text-xs text-cyan-300">
+              {state}
+            </span>
+          </div>
+
+          <div className="mt-5">
+            <AnalysisProgress
+              status={(analysis?.status || (state==='SELECTED'?'QUEUED':'PROCESSING')) as any}
+              currentStage={analysis?.current_stage as any}
+              progress={analysis?.progress??null}
+            />
+          </div>
+
+          {error && (
+            <div className="mt-5 rounded-xl bg-rose-500/10 border border-rose-500/20 p-4 text-sm text-rose-300">
+              {error}
+            </div>
+          )}
+
+          {state==='COMPLETED' && analysis && (
+            <button
+              onClick={()=>navigate(`/results/${analysis.analysis_id}`)}
+              className="mt-5 w-full py-3 rounded-xl bg-white text-slate-950 font-semibold"
+            >
+              Open forensic report →
+            </button>
+          )}
+
+          <div className="mt-6 text-xs text-slate-600 leading-5">
+            Images use a pretrained vision classifier. Videos are analyzed by
+            sampling frames and aggregating their scores.
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}

@@ -1,0 +1,30 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  color: #e8edf7;
+  background: #080b14;
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+}
+html, body, #root { min-height: 100%; margin: 0; }
+body {
+  min-width: 320px;
+  background:
+    radial-gradient(circle at 15% -10%, rgba(99,102,241,.20), transparent 32rem),
+    radial-gradient(circle at 90% 0%, rgba(14,165,233,.13), transparent 28rem),
+    #080b14;
+}
+* { box-sizing: border-box; }
+button, input { font: inherit; }
+.glass { background: rgba(17,24,39,.72); border: 1px solid rgba(148,163,184,.13); backdrop-filter: blur(18px); }
+.card { background: linear-gradient(180deg, rgba(19,26,43,.88), rgba(12,17,29,.88)); border: 1px solid rgba(148,163,184,.12); box-shadow: 0 18px 60px rgba(0,0,0,.22); }
+.grid-bg {
+  background-image: linear-gradient(rgba(148,163,184,.045) 1px, transparent 1px), linear-gradient(90deg, rgba(148,163,184,.045) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+.glow { box-shadow: 0 0 0 1px rgba(99,102,241,.18), 0 20px 80px rgba(79,70,229,.14); }
+.text-gradient { background: linear-gradient(90deg,#a5b4fc,#67e8f9); -webkit-background-clip:text; background-clip:text; color:transparent; }
+

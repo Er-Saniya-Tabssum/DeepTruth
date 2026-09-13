@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.env
+
+# Data
+dev.db
+*.db
+uploads/
+.model-cache/
+*.h5
+*.pt
+*.pth
+*.onnx
+
+# Frontend
+node_modules/
+dist/
+.vite/
+
+# OS
+.DS_Store
+Thumbs.db

@@ -1,0 +1,84 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      ENVIRONMENT: development
+      SECRET_KEY: change-me
+      DATABASE_URL: postgresql+psycopg2://deeptruth:deeptruth@db:5432/deeptruth
+      UPLOAD_DIR: /app/uploads
+      CORS_ORIGINS: http://localhost:3000
+      INFERENCE_MODE: REAL
+      MODEL_ID: capcheck/ai-image-detection
+      MODEL_REVISION: a6661e07d38f1a097bba07ca9415538819278f09
+      MODEL_CACHE_DIR: /app/.model-cache
+      MODEL_DEVICE: cpu
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend:/app/backend
+      - ./uploads:/app/uploads
+      - model-cache:/app/.model-cache
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: python -m backend.app.worker_runner
+    environment:
+      ENVIRONMENT: development
+      SECRET_KEY: change-me
+      DATABASE_URL: postgresql+psycopg2://deeptruth:deeptruth@db:5432/deeptruth
+      UPLOAD_DIR: /app/uploads
+      INFERENCE_MODE: REAL
+      MODEL_ID: capcheck/ai-image-detection
+      MODEL_REVISION: a6661e07d38f1a097bba07ca9415538819278f09
+      MODEL_CACHE_DIR: /app/.model-cache
+      MODEL_DEVICE: cpu
+    volumes:
+      - ./backend:/app/backend
+      - ./uploads:/app/uploads
+      - model-cache:/app/.model-cache
+    depends_on:
+      db:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_API_BASE_URL: http://localhost:8000
+    ports:
+      - "3000:80"
+    depends_on:
+      - api
+
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: deeptruth
+      POSTGRES_USER: deeptruth
+      POSTGRES_PASSWORD: deeptruth
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U deeptruth -d deeptruth"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+
+volumes:
+  model-cache:
+  postgres-data:
